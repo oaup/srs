@@ -94,11 +94,14 @@ srs_error_t SrsRtpConn::on_udp_packet(const sockaddr* from, const int fromlen, c
             }
             cache->copy(&pkt);
             cache->payload->append(pkt.payload->bytes(), pkt.payload->length());
-            if (!cache->completed && pprint->can_print()) {
+            if (pprint->can_print()) {
                 srs_trace("<- " SRS_CONSTS_LOG_STREAM_CASTER " rtsp: rtp chunked %dB, age=%d, vt=%d/%u, sts=%u/%#x/%#x, paylod=%dB",
                           nb_buf, pprint->age(), cache->version, cache->payload_type, cache->sequence_number, cache->timestamp, cache->ssrc,
                           cache->payload->length()
                           );
+            }
+
+            if (!cache->completed){
                 return err;
             }
         } else {
@@ -237,12 +240,21 @@ srs_error_t SrsRtspConn::serve()
     return err;
 }
 
+std::string SrsRtspConn::remote_ip()
+{
+    // TODO: FIXME: Implement it.
+    return "";
+}
+
 srs_error_t SrsRtspConn::do_cycle()
 {
     srs_error_t err = srs_success;
     
     // retrieve ip of client.
     std::string ip = srs_get_peer_ip(srs_netfd_fileno(stfd));
+    if (ip.empty() && !_srs_config->empty_ip_ok()) {
+        srs_warn("empty ip for fd=%d", srs_netfd_fileno(stfd));
+    }
     srs_trace("rtsp: serve %s", ip.c_str());
     
     // consume all rtsp messages.
@@ -645,6 +657,7 @@ srs_error_t SrsRtspConn::connect()
         std::string output = output_template;
         output = srs_string_replace(output, "[app]", app);
         output = srs_string_replace(output, "[stream]", rtsp_stream);
+        url = output;
     }
     
     // connect host.
@@ -677,6 +690,7 @@ SrsRtspCaster::SrsRtspCaster(SrsConfDirective* c)
     output = _srs_config->get_stream_caster_output(c);
     local_port_min = _srs_config->get_stream_caster_rtp_port_min(c);
     local_port_max = _srs_config->get_stream_caster_rtp_port_max(c);
+    manager = new SrsCoroutineManager();
 }
 
 SrsRtspCaster::~SrsRtspCaster()
@@ -684,10 +698,21 @@ SrsRtspCaster::~SrsRtspCaster()
     std::vector<SrsRtspConn*>::iterator it;
     for (it = clients.begin(); it != clients.end(); ++it) {
         SrsRtspConn* conn = *it;
-        srs_freep(conn);
+        manager->remove(conn);
     }
     clients.clear();
     used_ports.clear();
+
+    srs_freep(manager);
+}
+
+srs_error_t SrsRtspCaster::initialize()
+{
+    srs_error_t err = srs_success;
+    if ((err = manager->start()) != srs_success) {
+        return srs_error_wrap(err, "start manager");
+    }
+    return err;
 }
 
 srs_error_t SrsRtspCaster::alloc_port(int* pport)
@@ -740,6 +765,6 @@ void SrsRtspCaster::remove(SrsRtspConn* conn)
     }
     srs_info("rtsp: remove connection from caster.");
     
-    srs_freep(conn);
+    manager->remove(conn);
 }
 

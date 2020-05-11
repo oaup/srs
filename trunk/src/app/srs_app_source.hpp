@@ -33,6 +33,7 @@
 #include <srs_app_st.hpp>
 #include <srs_app_reload.hpp>
 #include <srs_core_performance.hpp>
+#include <srs_service_st.hpp>
 
 class SrsFormat;
 class SrsRtmpFormat;
@@ -53,6 +54,7 @@ class SrsNgExec;
 class SrsConnection;
 class SrsMessageHeader;
 class SrsHls;
+class SrsRtc;
 class SrsDvr;
 class SrsDash;
 class SrsEncoder;
@@ -60,6 +62,7 @@ class SrsBuffer;
 #ifdef SRS_AUTO_HDS
 class SrsHds;
 #endif
+class SrsRtpSharedPacket;
 
 // The time jitter algorithm:
 // 1. full, to ensure stream start at zero, and ensure stream monotonically increasing.
@@ -148,12 +151,13 @@ public:
     // Enqueue the message, the timestamp always monotonically.
     // @param msg, the msg to enqueue, user never free it whatever the return code.
     // @param is_overflow, whether overflow and shrinked. NULL to ignore.
-    virtual srs_error_t enqueue(SrsSharedPtrMessage* msg, bool* is_overflow = NULL);
+    // @remark If pass_timestamp, we never shrink and never care about the timestamp or duration.
+    virtual srs_error_t enqueue(SrsSharedPtrMessage* msg, bool* is_overflow = NULL, bool pass_timestamp = false);
     // Get packets in consumer queue.
     // @pmsgs SrsSharedPtrMessage*[], used to store the msgs, user must alloc it.
     // @count the count in array, output param.
     // @max_count the max count to dequeue, must be positive.
-    virtual srs_error_t dump_packets(int max_count, SrsSharedPtrMessage** pmsgs, int& count);
+    virtual srs_error_t dump_packets(int max_count, SrsSharedPtrMessage** pmsgs, int& count, bool pass_timestamp = false);
     // Dumps packets to consumer, use specified args.
     // @remark the atc/tba/tbv/ag are same to SrsConsumer.enqueue().
     virtual srs_error_t dump_packets(SrsConsumer* consumer, bool atc, SrsRtmpJitterAlgorithm ag);
@@ -200,10 +204,17 @@ private:
     int mw_min_msgs;
     srs_utime_t mw_duration;
 #endif
+private:
+    // For RTC, we never use jitter to correct timestamp.
+    // But we should not change the atc or time_jitter for source or RTMP.
+    // @remark In this mode, we also never check the queue by timstamp, but only by count.
+    bool pass_timestamp;
 public:
     SrsConsumer(SrsSource* s, SrsConnection* c);
     virtual ~SrsConsumer();
 public:
+    // Use pass timestamp mode.
+    void enable_pass_timestamp() { pass_timestamp = true; }
     // Set the size of queue.
     virtual void set_queue_size(srs_utime_t queue_size);
     // when source id changed, notice client to print.
@@ -322,6 +333,32 @@ public:
     virtual SrsSharedPtrMessage* pop();
 };
 
+#ifdef SRS_AUTO_RTC
+// To find the RTP packet for RTX or restore.
+// TODO: FIXME: Should queue RTP packets in connection level.
+class SrsRtpPacketQueue
+{
+private:
+    struct SeqComp
+    {
+        bool operator()(const uint16_t& l, const uint16_t& r) const
+        {
+            return ((int16_t)(r - l)) > 0;
+        }
+    };
+private:
+    std::map<uint16_t, SrsRtpSharedPacket*, SeqComp> pkt_queue;
+public:
+    SrsRtpPacketQueue();
+    virtual ~SrsRtpPacketQueue();
+public:
+    void clear();
+    void push(std::vector<SrsRtpSharedPacket*>& pkts);
+    void insert(const uint16_t& sequence, SrsRtpSharedPacket* pkt);
+    SrsRtpSharedPacket* find(const uint16_t& sequence);
+};
+#endif
+
 // The hub for origin is a collection of utilities for origin only,
 // For example, DVR, HLS, Forward and Transcode are only available for origin,
 // they are meanless for edge server.
@@ -330,11 +367,14 @@ class SrsOriginHub : public ISrsReloadHandler
 private:
     SrsSource* source;
     SrsRequest* req;
-    // Whether the stream hub is active, or stream is publishing.
     bool is_active;
 private:
     // The format, codec information.
     SrsRtmpFormat* format;
+#ifdef SRS_AUTO_RTC
+    // rtc handler
+    SrsRtc* rtc;
+#endif
     // hls handler.
     SrsHls* hls;
     // The DASH encoder.
@@ -364,6 +404,8 @@ public:
     // Cycle the hub, process some regular events,
     // For example, dispose hls in cycle.
     virtual srs_error_t cycle();
+    // Whether the stream hub is active, or stream is publishing.
+    virtual bool active();
 public:
     // When got a parsed metadata.
     virtual srs_error_t on_meta_data(SrsSharedPtrMessage* shared_metadata, SrsOnMetaDataPacket* packet);
@@ -376,7 +418,7 @@ public:
     virtual srs_error_t on_publish();
     // When stop publish stream.
     virtual void on_unpublish();
-    // Internal callback.
+// Internal callback.
 public:
     // For the SrsForwarder to callback to request the sequence headers.
     virtual srs_error_t on_forwarder_start(SrsForwarder* forwarder);
@@ -405,8 +447,10 @@ private:
     SrsSharedPtrMessage* meta;
     // The cached video sequence header, for example, sps/pps for h.264.
     SrsSharedPtrMessage* video;
+    SrsSharedPtrMessage* previous_video;
     // The cached audio sequence header, for example, asc for aac.
     SrsSharedPtrMessage* audio;
+    SrsSharedPtrMessage* previous_audio;
     // The format for sequence header.
     SrsRtmpFormat* vformat;
     SrsRtmpFormat* aformat;
@@ -416,6 +460,8 @@ public:
 public:
     // Dispose the metadata cache.
     virtual void dispose();
+    // For each publishing, clear the metadata cache.
+    virtual void clear();
 public:
     // Get the cached metadata.
     virtual SrsSharedPtrMessage* data();
@@ -430,6 +476,13 @@ public:
     // @param ds Whether dumps the sequence header.
     virtual srs_error_t dumps(SrsConsumer* consumer, bool atc, SrsRtmpJitterAlgorithm ag, bool dm, bool ds);
 public:
+    // Previous exists sequence header.
+    virtual SrsSharedPtrMessage* previous_vsh();
+    virtual SrsSharedPtrMessage* previous_ash();
+    // Update previous sequence header, drop old one, set to new sequence header.
+    virtual void update_previous_vsh();
+    virtual void update_previous_ash();
+public:
     // Update the cached metadata by packet.
     virtual srs_error_t update_data(SrsMessageHeader* header, SrsOnMetaDataPacket* metadata, bool& updated);
     // Update the cached audio sequence header.
@@ -438,32 +491,44 @@ public:
     virtual srs_error_t update_vsh(SrsSharedPtrMessage* msg);
 };
 
-// live streaming source.
-class SrsSource : public ISrsReloadHandler
+// The source manager to create and refresh all stream sources.
+class SrsSourceManager
 {
-    friend class SrsOriginHub;
 private:
-    static std::map<std::string, SrsSource*> pool;
+    srs_mutex_t lock;
+    std::map<std::string, SrsSource*> pool;
+public:
+    SrsSourceManager();
+    virtual ~SrsSourceManager();
 public:
     //  create source when fetch from cache failed.
     // @param r the client request.
     // @param h the event handler for source.
     // @param pps the matched source, if success never be NULL.
-    static srs_error_t fetch_or_create(SrsRequest* r, ISrsSourceHandler* h, SrsSource** pps);
+    virtual srs_error_t fetch_or_create(SrsRequest* r, ISrsSourceHandler* h, SrsSource** pps);
 private:
     // Get the exists source, NULL when not exists.
     // update the request and return the exists source.
-    static SrsSource* fetch(SrsRequest* r);
+    virtual SrsSource* fetch(SrsRequest* r);
 public:
     // dispose and cycle all sources.
-    static void dispose_all();
-    static srs_error_t cycle_all();
+    virtual void dispose();
+    virtual srs_error_t cycle();
 private:
-    static srs_error_t do_cycle_all();
+    virtual srs_error_t do_cycle();
 public:
     // when system exit, destroy the sources,
     // For gmc to analysis mem leaks.
-    static void destroy();
+    virtual void destroy();
+};
+
+// Global singleton instance.
+extern SrsSourceManager* _srs_sources;
+
+// live streaming source.
+class SrsSource : public ISrsReloadHandler
+{
+    friend class SrsOriginHub;
 private:
     // For publish, it's the publish client id.
     // For edge, it's the edge ingest id.
@@ -482,6 +547,10 @@ private:
     bool mix_correct;
     // The mix queue to implements the mix correct algorithm.
     SrsMixQueue* mix_queue;
+#ifdef SRS_AUTO_RTC
+    // rtp packet queue
+    SrsRtpPacketQueue* rtp_queue;
+#endif
     // For play, whether enabled atc.
     // The atc(use absolute time and donot adjust time),
     // directly use msg time and donot adjust if atc is true,
@@ -531,6 +600,8 @@ public:
     // Whether source is inactive, which means there is no publishing stream source.
     // @remark For edge, it's inactive util stream has been pulled from origin.
     virtual bool inactive();
+    // Update the authentication information in request.
+    virtual void update_auth(SrsRequest* r);
 public:
     virtual bool can_publish(bool is_edge);
     virtual srs_error_t on_meta_data(SrsCommonMessage* msg, SrsOnMetaDataPacket* metadata);
@@ -568,6 +639,13 @@ public:
     virtual void on_edge_proxy_unpublish();
 public:
     virtual std::string get_curr_origin();
+public:
+#ifdef SRS_AUTO_RTC
+    // Find rtp packet by sequence
+    SrsRtpSharedPacket* find_rtp_packet(const uint16_t& seq);
+    // Get the cached meta, as such the sps/pps.
+    SrsMetaCache* cached_meta();
+#endif
 };
 
 #endif

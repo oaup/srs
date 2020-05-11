@@ -147,6 +147,19 @@ protected:
     virtual srs_error_t encode_packet(SrsBuffer* stream);
 };
 
+// The performance statistic data collect.
+class ISrsProtocolPerf
+{
+public:
+    ISrsProtocolPerf();
+    virtual ~ISrsProtocolPerf();
+public:
+    // Stat for packets merged written, nb_msgs is the number of RTMP messages,
+    virtual void perf_on_msgs(int nb_msgs) = 0;
+    // Stat for TCP writev, nb_iovs is the total number of iovec.
+    virtual void perf_on_writev_iovs(int nb_iovs) = 0;
+};
+
 // The protocol provides the rtmp-message-protocol services,
 // To recv RTMP message from RTMP chunk stream,
 // and to send out RTMP message over RTMP chunk stream.
@@ -168,6 +181,8 @@ private:
 private:
     // The underlayer socket object, send/recv bytes.
     ISrsProtocolReadWriter* skt;
+    // The performance stat handler.
+    ISrsProtocolPerf* perf;
     // The requests sent out, used to build the response.
     // key: transactionId
     // value: the request command name
@@ -227,6 +242,8 @@ public:
     // @param v, whether auto response message when recv message.
     // @see: https://github.com/ossrs/srs/issues/217
     virtual void set_auto_response(bool v);
+    // Set the performance stat handler.
+    virtual void set_perf(ISrsProtocolPerf* v);
     // Flush for manual response when the auto response is disabled
     // by set_auto_response(false), we default use auto response, so donot
     // need to call this api(the protocol sdk will auto send message).
@@ -631,6 +648,8 @@ public:
     // @param v, whether auto response message when recv message.
     // @see: https://github.com/ossrs/srs/issues/217
     virtual void set_auto_response(bool v);
+    // Set the performance stat handler.
+    virtual void set_perf(ISrsProtocolPerf* v);
 #ifdef SRS_PERF_MERGED_READ
     // To improve read performance, merge some packets then read,
     // When it on and read small bytes, we sleep to wait more data.,
@@ -707,9 +726,9 @@ public:
     // @param server_ip the ip of server.
     virtual srs_error_t response_connect_app(SrsRequest* req, const char* server_ip = NULL);
     // Redirect the connection to another rtmp server.
-    // @param the hostname or ip of target.
+    // @param a RTMP url to redirect to.
     // @param whether the client accept the redirect.
-    virtual srs_error_t redirect(SrsRequest* r, std::string host, int port, bool& accepted);
+    virtual srs_error_t redirect(SrsRequest* r, std::string url, bool& accepted);
     // Reject the connect app request.
     virtual void response_connect_reject(SrsRequest* req, const char* desc);
     // Response  client the onBWDone message.

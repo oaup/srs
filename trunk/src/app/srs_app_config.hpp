@@ -119,6 +119,7 @@ extern bool srs_config_dvr_is_plan_session(std::string plan);
 extern bool srs_stream_caster_is_udp(std::string caster);
 extern bool srs_stream_caster_is_rtsp(std::string caster);
 extern bool srs_stream_caster_is_flv(std::string caster);
+extern bool srs_stream_caster_is_gb28181(std::string caster);
 // Whether the dvr_apply active the stream specified by req.
 extern bool srs_config_apply_filter(SrsConfDirective* dvr_apply, SrsRequest* req);
 
@@ -215,6 +216,7 @@ public:
 public:
     virtual SrsConfDirective* get_or_create(std::string n);
     virtual SrsConfDirective* get_or_create(std::string n, std::string a0);
+    virtual SrsConfDirective* get_or_create(std::string n, std::string a0, std::string a1);
     virtual SrsConfDirective* set_arg0(std::string a0);
     // Remove the v from sub directives, user must free the v.
     virtual void remove(SrsConfDirective* v);
@@ -331,6 +333,8 @@ private:
     // Reload  the http_stream section of config.
     // TODO: FIXME: rename to http_server.
     virtual srs_error_t reload_http_stream(SrsConfDirective* old_root);
+    // Reload the rtc_server section of config.
+    virtual srs_error_t reload_rtc_server(SrsConfDirective* old_root);
     // Reload  the transcode section of vhost of config.
     virtual srs_error_t reload_transcode(SrsConfDirective* new_vhost, SrsConfDirective* old_vhost);
     // Reload  the ingest section of vhost of config.
@@ -467,6 +471,22 @@ public:
     virtual std::string get_work_dir();
     // Whether use asprocess mode.
     virtual bool get_asprocess();
+    // Whether empty client IP is ok.
+    virtual bool empty_ip_ok();
+    // Get the start wait in ms for gracefully quit.
+    virtual srs_utime_t get_grace_start_wait();
+    // Get the final wait in ms for gracefully quit.
+    virtual srs_utime_t get_grace_final_wait();
+    // Whether force to gracefully quit, never fast quit.
+    virtual bool is_force_grace_quit();
+    // Whether disable daemon for docker.
+    virtual bool disable_daemon_for_docker();
+    // Whether use inotify to auto reload by watching config file changes.
+    virtual bool inotify_auto_reload();
+    // Whether enable auto reload config for docker.
+    virtual bool auto_reload_for_docker();
+    // For tcmalloc, get the release rate.
+    virtual double tcmalloc_release_rate();
 // stream_caster section
 public:
     // Get all stream_caster in config file.
@@ -483,6 +503,49 @@ public:
     virtual int get_stream_caster_rtp_port_min(SrsConfDirective* conf);
     // Get the max udp port for rtp of stream caster rtsp.
     virtual int get_stream_caster_rtp_port_max(SrsConfDirective* conf);
+
+    virtual srs_utime_t get_stream_caster_gb28181_rtp_idle_timeout(SrsConfDirective* conf);
+    virtual srs_utime_t get_stream_caster_gb28181_ack_timeout(SrsConfDirective* conf);
+    virtual srs_utime_t get_stream_caster_gb28181_keepalive_timeout(SrsConfDirective* conf);
+    virtual bool get_stream_caster_gb28181_audio_enable(SrsConfDirective* conf);
+    virtual std::string get_stream_caster_gb28181_host(SrsConfDirective* conf);
+    virtual std::string get_stream_caster_gb28181_serial(SrsConfDirective* conf);
+    virtual std::string get_stream_caster_gb28181_realm(SrsConfDirective* conf);
+    virtual bool get_stream_caster_gb28181_wait_keyframe(SrsConfDirective* conf);
+    virtual bool get_stream_caster_gb28181_sip_enable(SrsConfDirective* conf);
+    virtual bool get_stream_caster_gb28181_sip_auto_play(SrsConfDirective* conf);
+    virtual int get_stream_caster_gb28181_sip_listen(SrsConfDirective* conf);
+    virtual bool get_stream_caster_gb28181_sip_invite_port_fixed(SrsConfDirective* conf);
+    virtual bool get_stream_caster_gb28181_auto_create_channel(SrsConfDirective* conf);
+    virtual srs_utime_t get_stream_caster_gb28181_sip_query_catalog_interval(SrsConfDirective* conf);
+
+// rtc section
+public:
+    virtual int get_rtc_server_enabled();
+    virtual bool get_rtc_server_enabled(SrsConfDirective* conf);
+    virtual int get_rtc_server_listen();
+    virtual std::string get_rtc_server_candidates();
+    virtual bool get_rtc_server_ecdsa();
+    virtual int get_rtc_server_sendmmsg();
+    virtual bool get_rtc_server_encrypt();
+    virtual int get_rtc_server_reuseport();
+    virtual bool get_rtc_server_merge_nalus();
+    virtual bool get_rtc_server_gso();
+    virtual int get_rtc_server_padding();
+    virtual bool get_rtc_server_perf_stat();
+    virtual int get_rtc_server_queue_length();
+private:
+    virtual int get_rtc_server_reuseport2();
+    virtual bool get_rtc_server_gso2();
+
+public:
+    SrsConfDirective* get_rtc(std::string vhost);
+    bool get_rtc_enabled(std::string vhost);
+    bool get_rtc_bframe_discard(std::string vhost);
+    bool get_rtc_aac_discard(std::string vhost);
+    srs_utime_t get_rtc_stun_timeout(std::string vhost);
+    bool get_rtc_stun_strict_check(std::string vhost);
+
 // vhost specified section
 public:
     // Get the vhost directive by vhost name.
@@ -561,14 +624,18 @@ public:
     // @param vhost, the vhost to get the mr sleep time.
     // TODO: FIXME: add utest for mr config.
     virtual srs_utime_t get_mr_sleep(std::string vhost);
-    // Get the mw sleep time in srs_utime_t for vhost.
+    // Get the mw_latency, mw sleep time in srs_utime_t for vhost.
     // @param vhost, the vhost to get the mw sleep time.
     // TODO: FIXME: add utest for mw config.
-    virtual srs_utime_t get_mw_sleep(std::string vhost);
+    virtual srs_utime_t get_mw_sleep(std::string vhost, bool is_rtc = false);
+    // Get the mw_msgs, mw wait time in packets for vhost.
+    // @param vhost, the vhost to get the mw sleep msgs.
+    // TODO: FIXME: add utest for mw config.
+    virtual int get_mw_msgs(std::string vhost, bool is_realtime, bool is_rtc = false);
     // Whether min latency mode enabled.
     // @param vhost, the vhost to get the min_latency.
     // TODO: FIXME: add utest for min_latency.
-    virtual bool get_realtime_enabled(std::string vhost);
+    virtual bool get_realtime_enabled(std::string vhost, bool is_rtc = false);
     // Whether enable tcp nodelay for all clients of vhost.
     virtual bool get_tcp_nodelay(std::string vhost);
     // The minimal send interval in srs_utime_t.
@@ -588,6 +655,39 @@ public:
     virtual bool get_forward_enabled(std::string vhost);
     // Get the forward directive of vhost.
     virtual SrsConfDirective* get_forwards(std::string vhost);
+
+public:
+    // Whether the srt sevice enabled
+    virtual bool get_srt_enabled();
+    // Get the srt service listen port
+    virtual unsigned short get_srt_listen_port();
+    // Get the srt SRTO_MAXBW, max bandwith, default is -1.
+    virtual int get_srto_maxbw();
+    // Get the srt SRTO_MSS, Maximum Segment Size, default is 1500.
+    virtual int get_srto_mss();
+    // Get the srt SRTO_LATENCY, latency, default is 0 which means peer/recv latency is 120ms.
+    virtual int get_srto_latency();
+    // Get the srt SRTO_RCVLATENCY, recv latency, default is 120ms.
+    virtual int get_srto_recv_latency();
+    // Get the srt SRTO_PEERLATENCY, peer latency, default is 0..
+    virtual int get_srto_peer_latency();
+    // Get the srt h264 sei filter, default is on, it will drop h264 sei packet.
+    virtual bool get_srt_sei_filter();
+    // Get the srt SRTO_TLPKDROP, Too-late Packet Drop, default is true.
+    virtual bool get_srto_tlpkdrop();
+    // Get the srt SRTO_CONNTIMEO, connection timeout, default is 3000ms.
+    virtual int get_srto_conntimeout();
+    // Get the srt SRTO_SNDBUF, send buffer, default is 8192 × (1500-28).
+    virtual int get_srto_sendbuf();
+    // Get the srt SRTO_RCVBUF, recv buffer, default is 8192 × (1500-28).
+    virtual int get_srto_recvbuf();
+    // SRTO_PAYLOADSIZE
+    virtual int get_srto_payloadsize();
+    // Get the default app.
+    virtual std::string get_default_app_name();
+    // Get the mix_correct
+    virtual bool get_srt_mix_correct();
+
 // http_hooks section
 private:
     // Get the http_hooks directive of vhost.
@@ -778,10 +878,12 @@ public:
     // Get the log file path.
     virtual std::string get_log_file();
     // Whether ffmpeg log enabled
-    virtual bool get_ffmpeg_log_enabled();
+    virtual bool get_ff_log_enabled();
     // The ffmpeg log dir.
     // @remark, /dev/null to disable it.
-    virtual std::string get_ffmpeg_log_dir();
+    virtual std::string get_ff_log_dir();
+    // The ffmpeg log level.
+    virtual std::string get_ff_log_level();
 // The MPEG-DASH section.
 private:
     virtual SrsConfDirective* get_dash(std::string vhost);

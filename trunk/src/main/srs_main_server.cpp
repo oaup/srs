@@ -37,6 +37,10 @@ using namespace std;
 #include <gperftools/profiler.h>
 #endif
 
+#ifdef SRS_AUTO_GPERF
+#include <gperftools/malloc_extension.h>
+#endif
+
 #include <unistd.h>
 using namespace std;
 
@@ -48,12 +52,20 @@ using namespace std;
 #include <srs_core_performance.hpp>
 #include <srs_app_utility.hpp>
 #include <srs_core_autofree.hpp>
+#include <srs_kernel_file.hpp>
+#include <srs_app_hybrid.hpp>
+#ifdef SRS_AUTO_RTC
+#include <srs_app_rtc_conn.hpp>
+#endif
+
+#ifdef SRS_AUTO_SRT
+#include <srt_server.hpp>
+#endif
 
 // pre-declare
-srs_error_t run(SrsServer* svr);
-srs_error_t run_master(SrsServer* svr);
+srs_error_t run_directly_or_daemon();
+srs_error_t run_hybrid_server();
 void show_macro_features();
-string srs_getenv(const char* name);
 
 // @global log and context.
 ISrsLog* _srs_log = new SrsFastLog();
@@ -119,9 +131,10 @@ srs_error_t do_main(int argc, char** argv)
     
     // config already applied to log.
     srs_trace("%s, %s", RTMP_SIG_SRS_SERVER, RTMP_SIG_SRS_LICENSE);
-    srs_trace("contributors: " SRS_AUTO_CONSTRIBUTORS);
-    srs_trace("cwd=%s, work_dir=%s, build: %s, configure: %s, uname: %s",
-        _srs_config->cwd().c_str(), cwd.c_str(), SRS_AUTO_BUILD_DATE, SRS_AUTO_USER_CONFIGURE, SRS_AUTO_UNAME);
+    srs_trace("authors: %s", RTMP_SIG_SRS_AUTHORS);
+    srs_trace("contributors: %s", SRS_AUTO_CONSTRIBUTORS);
+    srs_trace("cwd=%s, work_dir=%s, build: %s, configure: %s, uname: %s, osx: %d",
+        _srs_config->cwd().c_str(), cwd.c_str(), SRS_AUTO_BUILD_DATE, SRS_AUTO_USER_CONFIGURE, SRS_AUTO_UNAME, SRS_AUTO_OSX_BOOL);
     srs_trace("configure detail: " SRS_AUTO_CONFIGURE);
 #ifdef SRS_AUTO_EMBEDED_TOOL_CHAIN
     srs_trace("crossbuild tool chain: " SRS_AUTO_EMBEDED_TOOL_CHAIN);
@@ -176,11 +189,18 @@ srs_error_t do_main(int argc, char** argv)
     
     // features
     show_macro_features();
+
+#ifdef SRS_AUTO_GPERF
+    // For tcmalloc, use slower release rate.
+    if (true) {
+        double trr = _srs_config->tcmalloc_release_rate();
+        double otrr = MallocExtension::instance()->GetMemoryReleaseRate();
+        MallocExtension::instance()->SetMemoryReleaseRate(trr);
+        srs_trace("tcmalloc: set release-rate %.2f=>%.2f", otrr, trr);
+    }
+#endif
     
-    SrsServer* svr = new SrsServer();
-    SrsAutoFree(SrsServer, svr);
-    
-    if ((err = run(svr)) != srs_success) {
+    if ((err = run_directly_or_daemon()) != srs_success) {
         return srs_error_wrap(err, "run");
     }
     
@@ -189,7 +209,7 @@ srs_error_t do_main(int argc, char** argv)
 
 int main(int argc, char** argv) {
     srs_error_t err = do_main(argc, argv);
-    
+
     if (err != srs_success) {
         srs_error("Failed, %s", srs_error_desc(err).c_str());
     }
@@ -214,6 +234,7 @@ void show_macro_features()
         ss << ", dash:" << "on";
         ss << ", hls:" << srs_bool2switch(true);
         ss << ", hds:" << srs_bool2switch(SRS_AUTO_HDS_BOOL);
+        ss << ", srt:" << srs_bool2switch(SRS_AUTO_SRT_BOOL);
         // hc(http callback)
         ss << ", hc:" << srs_bool2switch(true);
         // ha(http api)
@@ -236,16 +257,6 @@ void show_macro_features()
     if (true) {
         stringstream ss;
         ss << "SRS on ";
-#ifdef SRS_OSX
-        ss << "OSX";
-#endif
-#ifdef SRS_PI
-        ss << "RespberryPi";
-#endif
-#ifdef SRS_CUBIE
-        ss << "CubieBoard";
-#endif
-        
 #if defined(__amd64__)
         ss << " amd64";
 #endif
@@ -258,9 +269,11 @@ void show_macro_features()
 #if defined(__arm__)
         ss << "arm";
 #endif
-        
-#ifndef SRS_OSX
-        ss << ", glibc" << (int)__GLIBC__ << "." <<  (int)__GLIBC_MINOR__;
+#if defined(__aarch64__)
+        ss << " aarch64";
+#endif
+#if defined(SRS_AUTO_CROSSBUILD)
+        ss << "(crossbuild)";
 #endif
         
         ss << ", conf:" << _srs_config->config() << ", limit:" << _srs_config->get_max_connections()
@@ -338,8 +351,8 @@ void show_macro_features()
 #endif
     
 #if VERSION_MAJOR > VERSION_STABLE
-#warning "Current branch is unstable."
-    srs_warn("Develop is unstable, please use branch: git checkout -b %s origin/%s", VERSION_STABLE_BRANCH, VERSION_STABLE_BRANCH);
+    #warning "Current branch is develop."
+    srs_warn("%s/%s is develop", RTMP_SIG_SRS_KEY, RTMP_SIG_SRS_VERSION);
 #endif
     
 #if defined(SRS_PERF_SO_SNDBUF_SIZE) && !defined(SRS_PERF_MW_SO_SNDBUF)
@@ -347,29 +360,57 @@ void show_macro_features()
 #endif
 }
 
-string srs_getenv(const char* name)
-{
-    char* cv = ::getenv(name);
-    
-    if (cv) {
-        return cv;
-    }
-    
-    return "";
-}
-
-srs_error_t run(SrsServer* svr)
+// Detect docker by https://stackoverflow.com/a/41559867
+bool _srs_in_docker = false;
+srs_error_t srs_detect_docker()
 {
     srs_error_t err = srs_success;
 
-    // Initialize the whole system, set hooks to handle server level events.
-    if ((err = svr->initialize(NULL)) != srs_success) {
-        return srs_error_wrap(err, "server initialize");
+    _srs_in_docker = false;
+
+    SrsFileReader fr;
+    if ((err = fr.open("/proc/1/cgroup")) != srs_success) {
+        return err;
+    }
+
+    ssize_t nn;
+    char buf[1024];
+    if ((err = fr.read(buf, sizeof(buf), &nn)) != srs_success) {
+        return err;
+    }
+
+    if (nn <= 0) {
+        return err;
+    }
+
+    string s(buf, nn);
+    if (srs_string_contains(s, "/docker")) {
+        _srs_in_docker = true;
+    }
+
+    return err;
+}
+
+srs_error_t run_directly_or_daemon()
+{
+    srs_error_t err = srs_success;
+
+    // Ignore any error while detecting docker.
+    if ((err = srs_detect_docker()) != srs_success) {
+        srs_error_reset(err);
+    }
+
+    // Load daemon from config, disable it for docker.
+    // @see https://github.com/ossrs/srs/issues/1594
+    bool in_daemon = _srs_config->get_daemon();
+    if (in_daemon && _srs_in_docker && _srs_config->disable_daemon_for_docker()) {
+        srs_warn("disable daemon for docker");
+        in_daemon = false;
     }
     
     // If not daemon, directly run master.
-    if (!_srs_config->get_daemon()) {
-        if ((err = run_master(svr)) != srs_success) {
+    if (!in_daemon) {
+        if ((err = run_hybrid_server()) != srs_success) {
             return srs_error_wrap(err, "run master");
         }
         return srs_success;
@@ -406,49 +447,41 @@ srs_error_t run(SrsServer* svr)
     // son
     srs_trace("son(daemon) process running.");
     
-    if ((err = run_master(svr)) != srs_success) {
+    if ((err = run_hybrid_server()) != srs_success) {
         return srs_error_wrap(err, "daemon run master");
     }
     
     return err;
 }
 
-srs_error_t run_master(SrsServer* svr)
+srs_error_t run_hybrid_server()
 {
     srs_error_t err = srs_success;
-    
-    if ((err = svr->initialize_st()) != srs_success) {
-        return srs_error_wrap(err, "initialize st");
+
+    // Create servers and register them.
+    _srs_hybrid->register_server(new SrsServerAdapter());
+
+#ifdef SRS_AUTO_SRT
+    _srs_hybrid->register_server(new SrtServerAdapter());
+#endif
+
+#ifdef SRS_AUTO_RTC
+    _srs_hybrid->register_server(new RtcServerAdapter());
+#endif
+
+    // Do some system initialize.
+    if ((err = _srs_hybrid->initialize()) != srs_success) {
+        return srs_error_wrap(err, "hybrid initialize");
     }
-    
-    if ((err = svr->initialize_signal()) != srs_success) {
-        return srs_error_wrap(err, "initialize signal");
+
+    // Should run util hybrid servers all done.
+    if ((err = _srs_hybrid->run()) != srs_success) {
+        return srs_error_wrap(err, "hybrid run");
     }
-    
-    if ((err = svr->acquire_pid_file()) != srs_success) {
-        return srs_error_wrap(err, "acquire pid file");
-    }
-    
-    if ((err = svr->listen()) != srs_success) {
-        return srs_error_wrap(err, "listen");
-    }
-    
-    if ((err = svr->register_signal()) != srs_success) {
-        return srs_error_wrap(err, "register signal");
-    }
-    
-    if ((err = svr->http_handle()) != srs_success) {
-        return srs_error_wrap(err, "http handle");
-    }
-    
-    if ((err = svr->ingest()) != srs_success) {
-        return srs_error_wrap(err, "ingest");
-    }
-    
-    if ((err = svr->cycle()) != srs_success) {
-        return srs_error_wrap(err, "main cycle");
-    }
-    
+
+    // After all done, stop and cleanup.
+    _srs_hybrid->stop();
+
     return err;
 }
 

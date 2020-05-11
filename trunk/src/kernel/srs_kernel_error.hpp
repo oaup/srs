@@ -284,6 +284,9 @@
 #define ERROR_MP4_ILLEGAL_MOOF              3089
 #define ERROR_OCLUSTER_DISCOVER             3090
 #define ERROR_OCLUSTER_REDIRECT             3091
+#define ERROR_INOTIFY_CREATE                3092
+#define ERROR_INOTIFY_OPENFD                3093
+#define ERROR_INOTIFY_WATCH                 3094
 
 ///////////////////////////////////////////////////////
 // HTTP/StreamCaster protocol error.
@@ -321,6 +324,52 @@
 #define ERROR_HTTP_302_INVALID              4038
 #define ERROR_BASE64_DECODE                 4039
 #define ERROR_HTTP_STREAM_EOF               4040
+
+///////////////////////////////////////////////////////
+// RTC protocol error.
+///////////////////////////////////////////////////////
+#define ERROR_RTC_PORT                      5000
+#define ERROR_RTP_PACKET_CREATE             5001
+#define ERROR_OpenSslCreateSSL              5002
+#define ERROR_OpenSslBIOReset               5003
+#define ERROR_OpenSslBIOWrite               5004
+#define ERROR_OpenSslBIONew                 5005
+#define ERROR_RTC_RTP                       5006
+#define ERROR_RTC_RTCP                      5007
+#define ERROR_RTC_STUN                      5008
+#define ERROR_RTC_DTLS                      5009
+#define ERROR_RTC_UDP                       5010
+#define ERROR_RTC_RTP_MUXER                 5011
+#define ERROR_RTC_SDP_DECODE                5012
+#define ERROR_RTC_SRTP_INIT                 5013
+#define ERROR_RTC_SRTP_PROTECT              5014
+#define ERROR_RTC_SRTP_UNPROTECT            5015
+#define ERROR_RTC_RTCP_CHECK                5016
+#define ERROR_RTC_SOURCE_CHECK              5017
+#define ERROR_RTC_SDP_EXCHANGE              5018
+
+///////////////////////////////////////////////////////
+// GB28181 API error.
+///////////////////////////////////////////////////////
+#define ERROR_GB28181_SERVER_NOT_RUN        6000
+#define ERROR_GB28181_SESSION_IS_EXIST      6001
+#define ERROR_GB28181_SESSION_IS_NOTEXIST   6002
+#define ERROR_GB28181_RTP_PORT_FULL         6003
+#define ERROR_GB28181_PORT_MODE_INVALID     6004
+#define ERROR_GB28181_VALUE_EMPTY           6005  
+#define ERROR_GB28181_ACTION_INVALID        6006 
+#define ERROR_GB28181_SIP_NOT_RUN           6007 
+#define ERROR_GB28181_SIP_INVITE_FAILED     6008
+#define ERROR_GB28181_SIP_BYE_FAILED        6009
+#define ERROR_GB28181_SIP_IS_INVITING       6010
+#define ERROR_GB28181_CREATER_RTMPMUXER_FAILED 6011
+#define ERROR_GB28181_SIP_CH_OFFLINE        6012
+#define ERROR_GB28181_SIP_CH_NOTEXIST       6013
+#define ERROR_GB28181_SIP_RAW_DATA_FAILED   6014
+#define ERROR_GB28181_SIP_PRASE_FAILED      6015
+#define ERROR_GB28181_SIP_PTZ_FAILED        6016
+#define ERROR_GB28181_SIP_NOT_INVITE        6017
+#define ERROR_GB28181_SIP_PTZ_CMD_INVALID   6018
 
 ///////////////////////////////////////////////////////
 // HTTP API error.
@@ -361,27 +410,31 @@ private:
     int rerrno;
     
     std::string desc;
+    std::string _summary;
 private:
     SrsCplxError();
 public:
     virtual ~SrsCplxError();
 private:
     virtual std::string description();
+    virtual std::string summary();
 public:
     static SrsCplxError* create(const char* func, const char* file, int line, int code, const char* fmt, ...);
     static SrsCplxError* wrap(const char* func, const char* file, int line, SrsCplxError* err, const char* fmt, ...);
     static SrsCplxError* success();
     static SrsCplxError* copy(SrsCplxError* from);
     static std::string description(SrsCplxError* err);
+    static std::string summary(SrsCplxError* err);
     static int error_code(SrsCplxError* err);
 };
 
 // Error helpers, should use these functions to new or wrap an error.
-#define srs_success SrsCplxError::success()
+#define srs_success 0 // SrsCplxError::success()
 #define srs_error_new(ret, fmt, ...) SrsCplxError::create(__FUNCTION__, __FILE__, __LINE__, ret, fmt, ##__VA_ARGS__)
 #define srs_error_wrap(err, fmt, ...) SrsCplxError::wrap(__FUNCTION__, __FILE__, __LINE__, err, fmt, ##__VA_ARGS__)
 #define srs_error_copy(err) SrsCplxError::copy(err)
 #define srs_error_desc(err) SrsCplxError::description(err)
+#define srs_error_summary(err) SrsCplxError::summary(err)
 #define srs_error_code(err) SrsCplxError::error_code(err)
 #define srs_error_reset(err) srs_freep(err); err = srs_success
 

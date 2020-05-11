@@ -217,6 +217,14 @@ srs_error_t SrsPacket::encode_packet(SrsBuffer* stream)
     return srs_error_new(ERROR_SYSTEM_PACKET_INVALID, "encode");
 }
 
+ISrsProtocolPerf::ISrsProtocolPerf()
+{
+}
+
+ISrsProtocolPerf::~ISrsProtocolPerf()
+{
+}
+
 SrsProtocol::AckWindowSize::AckWindowSize()
 {
     window = 0;
@@ -256,6 +264,7 @@ SrsProtocol::SrsProtocol(ISrsProtocolReadWriter* io)
     }
 
     out_c0c3_caches = new char[SRS_CONSTS_C0C3_HEADERS_MAX];
+    perf = NULL;
 }
 
 SrsProtocol::~SrsProtocol()
@@ -301,6 +310,11 @@ SrsProtocol::~SrsProtocol()
 void SrsProtocol::set_auto_response(bool v)
 {
     auto_response_when_recv = v;
+}
+
+void SrsProtocol::set_perf(ISrsProtocolPerf* v)
+{
+    perf = v;
 }
 
 srs_error_t SrsProtocol::manual_response_flush()
@@ -448,7 +462,12 @@ srs_error_t SrsProtocol::do_send_messages(SrsSharedPtrMessage** msgs, int nb_msg
     
     int c0c3_cache_index = 0;
     char* c0c3_cache = out_c0c3_caches + c0c3_cache_index;
-    
+
+    // How many messages are merged in written.
+    int nb_msgs_merged_written = 0;
+    // How many bytes of messages are merged in written.
+    int bytes_msgs_merged_written = 0;
+
     // try to send use the c0c3 header cache,
     // if cache is consumed, try another loop.
     for (int i = 0; i < nb_msgs; i++) {
@@ -462,6 +481,10 @@ srs_error_t SrsProtocol::do_send_messages(SrsSharedPtrMessage** msgs, int nb_msg
         if (!msg->payload || msg->size <= 0) {
             continue;
         }
+
+        // Increase the perf stat data.
+        nb_msgs_merged_written++;
+        bytes_msgs_merged_written += msg->size;
         
         // p set to current write position,
         // it's ok when payload is NULL and size is 0.
@@ -522,6 +545,13 @@ srs_error_t SrsProtocol::do_send_messages(SrsSharedPtrMessage** msgs, int nb_msg
                 if ((err = do_iovs_send(out_iovs, iov_index)) != srs_success) {
                     return srs_error_wrap(err, "send iovs");
                 }
+
+                // Notify about perf stat.
+                if (perf) {
+                    perf->perf_on_msgs(nb_msgs_merged_written);
+                    perf->perf_on_writev_iovs(iov_index);
+                    nb_msgs_merged_written = 0; bytes_msgs_merged_written = 0;
+                }
                 
                 // reset caches, while these cache ensure
                 // atleast we can sendout a chunk.
@@ -539,8 +569,20 @@ srs_error_t SrsProtocol::do_send_messages(SrsSharedPtrMessage** msgs, int nb_msg
     if (iov_index <= 0) {
         return err;
     }
-    
-    return do_iovs_send(out_iovs, iov_index);
+
+    // Send out iovs at a time.
+    if ((err = do_iovs_send(out_iovs, iov_index)) != srs_success) {
+        return srs_error_wrap(err, "send iovs");
+    }
+
+    // Notify about perf stat.
+    if (perf) {
+        perf->perf_on_msgs(nb_msgs_merged_written);
+        perf->perf_on_writev_iovs(iov_index);
+        nb_msgs_merged_written = 0; bytes_msgs_merged_written = 0;
+    }
+
+    return err;
 #else
     // try to send use the c0c3 header cache,
     // if cache is consumed, try another loop.
@@ -2209,6 +2251,11 @@ void SrsRtmpServer::set_auto_response(bool v)
     protocol->set_auto_response(v);
 }
 
+void SrsRtmpServer::set_perf(ISrsProtocolPerf* v)
+{
+    protocol->set_perf(v);
+}
+
 #ifdef SRS_PERF_MERGED_READ
 void SrsRtmpServer::set_merge_read(bool v, IMergeReadHandler* handler)
 {
@@ -2399,6 +2446,7 @@ srs_error_t SrsRtmpServer::response_connect_app(SrsRequest *req, const char* ser
     data->set("srs_license", SrsAmf0Any::str(RTMP_SIG_SRS_LICENSE));
     data->set("srs_url", SrsAmf0Any::str(RTMP_SIG_SRS_URL));
     data->set("srs_version", SrsAmf0Any::str(RTMP_SIG_SRS_VERSION));
+    data->set("srs_authors", SrsAmf0Any::str(RTMP_SIG_SRS_AUTHORS));
 
     if (server_ip) {
         data->set("srs_server_ip", SrsAmf0Any::str(server_ip));
@@ -2415,17 +2463,20 @@ srs_error_t SrsRtmpServer::response_connect_app(SrsRequest *req, const char* ser
 }
 
 #define SRS_RTMP_REDIRECT_TIMEOUT (3 * SRS_UTIME_SECONDS)
-srs_error_t SrsRtmpServer::redirect(SrsRequest* r, string host, int port, bool& accepted)
+srs_error_t SrsRtmpServer::redirect(SrsRequest* r, string url, bool& accepted)
 {
     srs_error_t err = srs_success;
     
     if (true) {
-        string url = srs_generate_rtmp_url(host, port, r->host, r->vhost, r->app, r->stream, r->param);
-        
         SrsAmf0Object* ex = SrsAmf0Any::object();
         ex->set("code", SrsAmf0Any::number(302));
-        ex->set("redirect", SrsAmf0Any::str(url.c_str()));
-        
+
+        // The redirect is tcUrl while redirect2 is RTMP URL.
+        // https://github.com/ossrs/srs/issues/1575#issuecomment-574999798
+        string tcUrl = srs_path_dirname(url);
+        ex->set("redirect", SrsAmf0Any::str(tcUrl.c_str()));
+        ex->set("redirect2", SrsAmf0Any::str(url.c_str()));
+
         SrsOnStatusCallPacket* pkt = new SrsOnStatusCallPacket();
         
         pkt->data->set(StatusLevel, SrsAmf0Any::str(StatusLevelError));
@@ -4484,6 +4535,11 @@ srs_error_t SrsOnMetaDataPacket::decode(SrsBuffer* stream)
         if ((err = srs_amf0_read_string(stream, name)) != srs_success) {
             return srs_error_wrap(err, "name");
         }
+    }
+
+    // Allows empty body metadata.
+    if (stream->empty()) {
+        return err;
     }
     
     // the metadata maybe object or ecma array

@@ -40,9 +40,6 @@ function srs_undefine_macro()
 }
 
 # export the preset.
-if [ $SRS_OSX = YES ]; then
-    srs_define_macro "SRS_OSX" $SRS_AUTO_HEADERS_H
-fi
 if [ $SRS_X86_X64 = YES ]; then
     srs_define_macro "SRS_X86_X64" $SRS_AUTO_HEADERS_H
 fi
@@ -68,6 +65,24 @@ if [ $SRS_HDS = YES ]; then
     srs_define_macro "SRS_AUTO_HDS" $SRS_AUTO_HEADERS_H
 else
     srs_undefine_macro "SRS_AUTO_HDS" $SRS_AUTO_HEADERS_H
+fi
+
+if [ $SRS_SRT = YES ]; then
+    srs_define_macro "SRS_AUTO_SRT" $SRS_AUTO_HEADERS_H
+else
+    srs_undefine_macro "SRS_AUTO_SRT" $SRS_AUTO_HEADERS_H
+fi
+
+if [ $SRS_RTC = YES ]; then
+    srs_define_macro "SRS_AUTO_RTC" $SRS_AUTO_HEADERS_H
+else
+    srs_undefine_macro "SRS_AUTO_RTC" $SRS_AUTO_HEADERS_H
+fi
+
+if [ $SRS_GB28181 = YES ]; then
+    srs_define_macro "SRS_AUTO_GB28181" $SRS_AUTO_HEADERS_H
+else
+    srs_undefine_macro "SRS_AUTO_GB28181" $SRS_AUTO_HEADERS_H
 fi
 
 if [ $SRS_MEM_WATCH = YES ]; then
@@ -134,6 +149,32 @@ if [ $SRS_LOG_TRACE = YES ]; then
     srs_define_macro "SRS_AUTO_TRACE" $SRS_AUTO_HEADERS_H
 else
     srs_undefine_macro "SRS_AUTO_TRACE" $SRS_AUTO_HEADERS_H
+fi
+if [ $SRS_CROSS_BUILD = YES ]; then
+    srs_define_macro "SRS_AUTO_CROSSBUILD" $SRS_AUTO_HEADERS_H
+else
+    srs_undefine_macro "SRS_AUTO_CROSSBUILD" $SRS_AUTO_HEADERS_H
+fi
+if [ $SRS_OSX = YES ]; then
+    srs_define_macro "SRS_AUTO_OSX" $SRS_AUTO_HEADERS_H
+else
+    srs_undefine_macro "SRS_AUTO_OSX" $SRS_AUTO_HEADERS_H
+fi
+if [ $SRS_SENDMMSG = YES ]; then
+    srs_define_macro "SRS_AUTO_SENDMMSG" $SRS_AUTO_HEADERS_H
+else
+    srs_undefine_macro "SRS_AUTO_SENDMMSG" $SRS_AUTO_HEADERS_H
+fi
+if [ $SRS_HAS_SENDMMSG = YES ]; then
+    srs_define_macro "SRS_AUTO_HAS_SENDMMSG" $SRS_AUTO_HEADERS_H
+else
+    srs_undefine_macro "SRS_AUTO_HAS_SENDMMSG" $SRS_AUTO_HEADERS_H
+fi
+
+if [ $SRS_DEBUG = YES ]; then
+    srs_define_macro "SRS_AUTO_DEBUG" $SRS_AUTO_HEADERS_H
+else
+    srs_undefine_macro "SRS_AUTO_DEBUG" $SRS_AUTO_HEADERS_H
 fi
 
 # prefix

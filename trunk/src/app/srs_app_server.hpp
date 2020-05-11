@@ -36,6 +36,8 @@
 #include <srs_app_listener.hpp>
 #include <srs_app_conn.hpp>
 #include <srs_service_st.hpp>
+#include <srs_app_gb28181.hpp>
+#include <srs_app_gb28181_sip.hpp>
 
 class SrsServer;
 class SrsConnection;
@@ -50,7 +52,10 @@ class ISrsUdpHandler;
 class SrsUdpListener;
 class SrsTcpListener;
 class SrsAppCasterFlv;
+class SrsRtspCaster;
 class SrsCoroutineManager;
+class SrsGb28181Caster;
+
 
 // The listener type for server to identify the connection,
 // that is, use different type to process the connection.
@@ -68,6 +73,10 @@ enum SrsListenerType
     SrsListenerRtsp = 4,
     // TCP stream, FLV stream over HTTP.
     SrsListenerFlv = 5,
+    // UDP stream, gb28181 ps stream over rtp, 
+    SrsListenerGb28181RtpMux = 6,
+    // UDP gb28181 sip server
+    SrsListenerGb28181Sip = 7,
 };
 
 // A common tcp listener, for RTMP/HTTP server.
@@ -107,7 +116,7 @@ class SrsRtspListener : virtual public SrsListener, virtual public ISrsTcpHandle
 {
 private:
     SrsTcpListener* listener;
-    ISrsTcpHandler* caster;
+    SrsRtspCaster* caster;
 public:
     SrsRtspListener(SrsServer* svr, SrsListenerType t, SrsConfDirective* c);
     virtual ~SrsRtspListener();
@@ -155,6 +164,18 @@ public:
     virtual ~SrsUdpCasterListener();
 };
 
+#ifdef SRS_AUTO_GB28181
+
+// A UDP gb28181 listener, for sip and rtp stream mux server.
+class SrsGb28181Listener :  public SrsUdpStreamListener
+{
+public:
+    SrsGb28181Listener(SrsServer* svr, SrsListenerType t, SrsConfDirective* c);
+    virtual ~SrsGb28181Listener();
+};
+
+#endif
+
 // Convert signal to io,
 // @see: st-1.9/docs/notes.html
 class SrsSignalManager : public ISrsCoroutineHandler
@@ -182,6 +203,24 @@ private:
     // Signal catching function.
     // Converts signal event to I/O event.
     static void sig_catcher(int signo);
+};
+
+// Auto reload by inotify.
+// @see https://github.com/ossrs/srs/issues/1635
+class SrsInotifyWorker : public ISrsCoroutineHandler
+{
+private:
+    SrsServer* server;
+    SrsCoroutine* trd;
+    srs_netfd_t inotify_fd;
+public:
+    SrsInotifyWorker(SrsServer* s);
+    virtual ~SrsInotifyWorker();
+public:
+    virtual srs_error_t start();
+// Interface ISrsEndlessThreadHandler.
+public:
+    virtual srs_error_t cycle();
 };
 
 // A handler to the handle cycle in SRS RTMP server.
@@ -227,6 +266,7 @@ private:
     bool signal_reload;
     bool signal_persistence_config;
     bool signal_gmc_stop;
+    bool signal_fast_quit;
     bool signal_gracefully_quit;
     // Parent pid for asprocess.
     int ppid;
@@ -241,6 +281,9 @@ private:
     // When SIGTERM, SRS should do cleanup, for example,
     // to stop all ingesters, cleanup HLS and dvr.
     virtual void dispose();
+    // Close listener to stop accepting new connections,
+    // then wait and quit when all connections finished.
+    virtual void gracefully_dispose();
 // server startup workflow, @see run_master()
 public:
     // Initialize server with callback handler ch.
@@ -260,12 +303,13 @@ public:
     // The signal manager convert signal to io message,
     // whatever, we will got the signo like the orignal signal(int signo) handler.
     // @param signo the signal number from user, where:
-    //      SRS_SIGNAL_GRACEFULLY_QUIT, the SIGTERM, dispose then quit.
+    //      SRS_SIGNAL_FAST_QUIT, the SIGTERM, do essential dispose then quit.
+    //      SRS_SIGNAL_GRACEFULLY_QUIT, the SIGQUIT, do careful dispose then quit.
     //      SRS_SIGNAL_REOPEN_LOG, the SIGUSR1, reopen the log file.
     //      SRS_SIGNAL_RELOAD, the SIGHUP, reload the config.
     //      SRS_SIGNAL_PERSISTENCE_CONFIG, application level signal, persistence config to file.
     // @remark, for SIGINT:
-    //       no gmc, directly exit.
+    //       no gmc, fast quit, do essential dispose then quit.
     //       for gmc, set the variable signal_gmc_stop, the cycle will return and cleanup for gmc.
     // @remark, maybe the HTTP RAW API will trigger the on_signal() also.
     virtual void on_signal(int signo);
@@ -279,6 +323,9 @@ private:
     virtual srs_error_t listen_http_api();
     virtual srs_error_t listen_http_stream();
     virtual srs_error_t listen_stream_caster();
+#ifdef SRS_AUTO_GB28181
+    virtual srs_error_t listen_gb28181_sip(SrsConfDirective* c);
+#endif
     // Close the listeners for specified type,
     // Remove the listen object from manager.
     virtual void close_listeners(SrsListenerType type);
@@ -291,6 +338,8 @@ public:
     //       for instance RTMP connection to serve client.
     // @param stfd, the client fd in st boxed, the underlayer fd.
     virtual srs_error_t accept_client(SrsListenerType type, srs_netfd_t stfd);
+    // TODO: FIXME: Fetch from hybrid server manager.
+    virtual SrsHttpServeMux* api_server();
 private:
     virtual srs_error_t fd2conn(SrsListenerType type, srs_netfd_t stfd, SrsConnection** pconn);
 // Interface IConnectionManager

@@ -40,6 +40,9 @@ using namespace std;
 #include <srs_kernel_utility.hpp>
 #include <srs_core_mem_watch.hpp>
 #include <srs_core_autofree.hpp>
+#ifdef SRS_AUTO_RTC
+#include <srs_kernel_rtp.hpp>
+#endif
 
 SrsMessageHeader::SrsMessageHeader()
 {
@@ -191,8 +194,11 @@ srs_error_t SrsCommonMessage::create(SrsMessageHeader* pheader, char* body, int 
     return srs_success;
 }
 
-SrsSharedMessageHeader::SrsSharedMessageHeader() : payload_length(0), message_type(0), perfer_cid(0)
+SrsSharedMessageHeader::SrsSharedMessageHeader()
 {
+    payload_length = 0;
+    message_type = 0;
+    perfer_cid = 0;
 }
 
 SrsSharedMessageHeader::~SrsSharedMessageHeader()
@@ -204,6 +210,16 @@ SrsSharedPtrMessage::SrsSharedPtrPayload::SrsSharedPtrPayload()
     payload = NULL;
     size = 0;
     shared_count = 0;
+
+#ifdef SRS_AUTO_RTC
+    samples = NULL;
+    nn_samples = 0;
+    has_idr = false;
+
+    extra_payloads = NULL;
+    nn_extra_payloads = 0;
+    nn_max_extra_payloads = 0;
+#endif
 }
 
 SrsSharedPtrMessage::SrsSharedPtrPayload::~SrsSharedPtrPayload()
@@ -212,6 +228,17 @@ SrsSharedPtrMessage::SrsSharedPtrPayload::~SrsSharedPtrPayload()
     srs_memory_unwatch(payload);
 #endif
     srs_freepa(payload);
+
+#ifdef SRS_AUTO_RTC
+    srs_freepa(samples);
+    
+    for (int i = 0; i < nn_extra_payloads; i++) {
+        SrsSample* p = extra_payloads + i;
+        srs_freep(p->bytes);
+    }
+    srs_freepa(extra_payloads);
+    nn_extra_payloads = 0;
+#endif
 }
 
 SrsSharedPtrMessage::SrsSharedPtrMessage() : timestamp(0), stream_id(0), size(0), payload(NULL)
@@ -291,7 +318,7 @@ bool SrsSharedPtrMessage::check(int stream_id)
 
     // we donot use the complex basic header,
     // ensure the basic header is 1bytes.
-    if (ptr->header.perfer_cid < 2) {
+    if (ptr->header.perfer_cid < 2 || ptr->header.perfer_cid > 63) {
         srs_info("change the chunk_id=%d to default=%d", ptr->header.perfer_cid, RTMP_CID_ProtocolControl);
         ptr->header.perfer_cid = RTMP_CID_ProtocolControl;
     }
@@ -345,31 +372,51 @@ SrsSharedPtrMessage* SrsSharedPtrMessage::copy()
     copy->stream_id = stream_id;
     copy->payload = ptr->payload;
     copy->size = ptr->size;
-    
+
     return copy;
 }
+
+#ifdef SRS_AUTO_RTC
+void SrsSharedPtrMessage::set_extra_payloads(SrsSample* payloads, int nn_payloads)
+{
+    srs_assert(nn_payloads);
+    srs_assert(!ptr->extra_payloads);
+    
+    ptr->nn_extra_payloads = nn_payloads;
+
+    ptr->extra_payloads = new SrsSample[nn_payloads];
+    memcpy((void*)ptr->extra_payloads, payloads, nn_payloads * sizeof(SrsSample));
+}
+
+void SrsSharedPtrMessage::set_samples(SrsSample* samples, int nn_samples)
+{
+    srs_assert(nn_samples);
+    srs_assert(!ptr->samples);
+
+    ptr->nn_samples = nn_samples;
+
+    ptr->samples = new SrsSample[nn_samples];
+    memcpy((void*)ptr->samples, samples, nn_samples * sizeof(SrsSample));
+}
+#endif
 
 SrsFlvTransmuxer::SrsFlvTransmuxer()
 {
     writer = NULL;
     
-#ifdef SRS_PERF_FAST_FLV_ENCODER
     nb_tag_headers = 0;
     tag_headers = NULL;
     nb_iovss_cache = 0;
     iovss_cache = NULL;
     nb_ppts = 0;
     ppts = NULL;
-#endif
 }
 
 SrsFlvTransmuxer::~SrsFlvTransmuxer()
 {
-#ifdef SRS_PERF_FAST_FLV_ENCODER
     srs_freepa(tag_headers);
     srs_freepa(iovss_cache);
     srs_freepa(ppts);
-#endif
 }
 
 srs_error_t SrsFlvTransmuxer::initialize(ISrsWriter* fw)
@@ -379,15 +426,19 @@ srs_error_t SrsFlvTransmuxer::initialize(ISrsWriter* fw)
     return srs_success;
 }
 
-srs_error_t SrsFlvTransmuxer::write_header()
+srs_error_t SrsFlvTransmuxer::write_header(bool has_video, bool has_audio)
 {
     srs_error_t err = srs_success;
-    
+
+    uint8_t av_flag = 0;
+    av_flag += (has_audio? 4:0);
+    av_flag += (has_video? 1:0);
+
     // 9bytes header and 4bytes first previous-tag-size
     char flv_header[] = {
         'F', 'L', 'V', // Signatures "FLV"
         (char)0x01, // File version (for example, 0x01 for FLV version 1)
-        (char)0x05, // 4, audio; 1, video; 5 audio+video.
+        (char)av_flag, // 4, audio; 1, video; 5 audio+video.
         (char)0x00, (char)0x00, (char)0x00, (char)0x09 // DataOffset UI32 The length of this header in bytes
     };
     
@@ -472,7 +523,6 @@ int SrsFlvTransmuxer::size_tag(int data_size)
     return SRS_FLV_TAG_HEADER_SIZE + data_size + SRS_FLV_PREVIOUS_TAG_SIZE;
 }
 
-#ifdef SRS_PERF_FAST_FLV_ENCODER
 srs_error_t SrsFlvTransmuxer::write_tags(SrsSharedPtrMessage** msgs, int count)
 {
     srs_error_t err = srs_success;
@@ -542,7 +592,6 @@ srs_error_t SrsFlvTransmuxer::write_tags(SrsSharedPtrMessage** msgs, int count)
     
     return err;
 }
-#endif
 
 void SrsFlvTransmuxer::cache_metadata(char type, char* data, int size, char* cache)
 {
